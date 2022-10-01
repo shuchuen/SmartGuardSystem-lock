@@ -1,30 +1,48 @@
 #include <SPI.h>
+#include <string>
 #include <MFRC522.h>
+#include <Stepper.h>
 #include <WiFiNINA.h>
 #include <ArduinoMqttClient.h>
 #include "arduino_secret.h"
 
 #define SS_PIN 10
 #define RST_PIN 9
+#define RED_LED_PIN 2
+#define GREEN_LED_PIN 3
+#define BUTTON_PIN 4
+#define SWITCH_PIN 5
+#define BUZZER_PIN 6
+#define STEPPER_PIN_1 11
+#define STEPPER_PIN_2 12
+#define STEPPER_PIN_3 13
+#define STEPPER_PIN_4 14
 
 //wifi config
 char ssid[] = SECRET_SSID;
 char pass[] = SECRET_PASS;
-char hostname[] = "Smart Guard System-lock";
+char hostname[] = "lock.sgs.1";
 int status = WL_IDLE_STATUS;
 
 //RFID config
 MFRC522 rfid(SS_PIN, RST_PIN); // Instance of the class
 MFRC522::MIFARE_Key key;
-// Init array that will store new NUID 
-byte nuidPICC[4];
 
 //MQTT config
 WiFiClient wifiClient;
 MqttClient mqttClient(wifiClient);
 
 //API config
-WiFiServer server(8089);
+WiFiServer server(8080);
+
+// initialize the stepper
+int stepsPerRevolution = 100;
+Stepper myStepper(stepsPerRevolution, STEPPER_PIN_1, STEPPER_PIN_2, STEPPER_PIN_3, STEPPER_PIN_4);
+
+//variables 
+bool paired = false;
+bool locked = true;
+bool calibrated = false;
 
 void initWiFi() {
   // check for the WiFi module:
@@ -66,7 +84,8 @@ void setup() {
 
   Serial.println(F("This code scan the MIFARE Classsic NUID."));
   Serial.print(F("Using the following key:"));
-  printHex(key.keyByte, MFRC522::MF_KEY_SIZE);
+  String keyValue = getHexValue(key.keyByte, MFRC522::MF_KEY_SIZE);
+  Serial.print(keyValue);
 
   //Init server 
   server.begin();
@@ -75,12 +94,24 @@ void setup() {
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
-  readRFID();
+
+  while (!calibrated){
+    //waiting for calibrate the stepper motor
+    calibrateStepper();
+  }
+
+  while (!paired){
+    //waiting for pairing
+    apiListener();
+  }
+
+  rfidListener();
+  doorSwitchListener();
+  buttonListener();
 }
 
 
-void readRFID(){
+void rfidListener(){
   // Reset the loop if no new card present on the sensor/reader. This saves the entire process when idle.
   if ( ! rfid.PICC_IsNewCardPresent())
     return;
@@ -101,36 +132,51 @@ void readRFID(){
     return;
   }
 
-  if (rfid.uid.uidByte[0] != nuidPICC[0] || 
-    rfid.uid.uidByte[1] != nuidPICC[1] || 
-    rfid.uid.uidByte[2] != nuidPICC[2] || 
-    rfid.uid.uidByte[3] != nuidPICC[3] ) {
-    Serial.println(F("A new card has been detected."));
-
-    // Store NUID into nuidPICC array
-    for (byte i = 0; i < 4; i++) {
-      nuidPICC[i] = rfid.uid.uidByte[i];
-    }
-   
-    Serial.println(F("The NUID tag is:"));
-    Serial.print(F("In hex: "));
-    printHex(rfid.uid.uidByte, rfid.uid.size);
-    Serial.println();
-    Serial.print(F("In dec: "));
-    printDec(rfid.uid.uidByte, rfid.uid.size);
-    Serial.println();
-  }
-  else Serial.println(F("Card read previously."));
-
+  String uid = getHexValue(rfid.uid.uidByte, rfid.uid.size);
+  
   // Halt PICC
   rfid.PICC_HaltA();
 
   // Stop encryption on PCD
   rfid.PCD_StopCrypto1();
+  
+  //request verification from control hub
 }
 
-void readAPI(){
-    // Check if a client has connected
+void calibrateStepper(){
+
+}
+
+void pairing(){
+
+}
+
+void updateStatus(){
+
+}
+
+void doorSwitchListener(){
+
+}
+
+void buttonListener(){
+
+}
+
+void motorController(){
+
+}
+
+void buzzerController(){
+
+}
+
+void ledController(){
+
+}
+
+void apiListener(){
+  // Check if a client has connected
   WiFiClient client = server.available();
   if (!client) {
     return;
@@ -148,14 +194,13 @@ void readAPI(){
   client.flush();
   // Match the request
 
-  if (req.indexOf("/sgs/accessCard") != -1) {
+  if (req.indexOf("/status") != -1) {
     //handle the request
+    updateStatus();
   }
-  else if (req.indexOf("/sgs/status") != -1) {
+  else if (req.indexOf("/pairing") != -1) {
     //handle the request
-  }
-  else if (req.indexOf("/sgs/pairing") != -1) {
-    //handle the request
+    pairing();
   }
   else {
     Serial.println("invalid request");
@@ -172,22 +217,15 @@ void readAPI(){
   Serial.println("Client disonnected");
 }
 
-/**
- * Helper routine to dump a byte array as hex values to Serial. 
- */
-void printHex(byte *buffer, byte bufferSize) {
+
+String getHexValue(byte *buffer, byte bufferSize) {
+  String result = "";
+
   for (byte i = 0; i < bufferSize; i++) {
-    Serial.print(buffer[i] < 0x10 ? " 0" : " ");
-    Serial.print(buffer[i], HEX);
+    result.concat(String(buffer[i] < 0x10 ? " 0" : " "));
+    result.concat(String(buffer[i], HEX));
   }
+
+  return result;
 }
 
-/**
- * Helper routine to dump a byte array as dec values to Serial.
- */
-void printDec(byte *buffer, byte bufferSize) {
-  for (byte i = 0; i < bufferSize; i++) {
-    Serial.print(buffer[i] < 0x10 ? " 0" : " ");
-    Serial.print(buffer[i], DEC);
-  }
-}
