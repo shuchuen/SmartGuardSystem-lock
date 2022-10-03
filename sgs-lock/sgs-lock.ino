@@ -3,8 +3,10 @@
 #include <MFRC522.h>
 #include <Stepper.h>
 #include <WiFiNINA.h>
+#include <ArduinoHttpClient.h>
 #include <ArduinoMqttClient.h>
 #include "arduino_secret.h"
+
 
 #define SS_PIN 10
 #define RST_PIN 9
@@ -36,13 +38,23 @@ MqttClient mqttClient(wifiClient);
 WiFiServer server(8080);
 
 // initialize the stepper
-int stepsPerRevolution = 100;
+int stepsPerRevolution = 360;
 Stepper myStepper(stepsPerRevolution, STEPPER_PIN_1, STEPPER_PIN_2, STEPPER_PIN_3, STEPPER_PIN_4);
+int lockStep = 0;
+int direction = 1; // if door direction is left, set it as -1
+
+//http conifg
+String serverAddress = "";  // set after pairing
+int port = 8080;
 
 //variables 
 bool paired = false;
 bool locked = true;
 bool calibrated = false;
+int buttonState = 0; 
+int switchState = 0;
+
+
 
 void initWiFi() {
   // check for the WiFi module:
@@ -91,18 +103,28 @@ void setup() {
   server.begin();
   Serial.println("Server started");
 
+  // initialize the outputs:
+  pinMode(RED_LED_PIN, OUTPUT);
+  pinMode(GREEN_LED_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  // initialize the pushbutton pin as an input:
+  pinMode(BUTTON_PIN, INPUT);
+  pinMode(SWITCH_PIN, INPUT);
+
 }
 
 void loop() {
 
+  while (!paired){
+    //waiting for pairing
+    ledController("UNPAIR");
+    pairing();
+
+  }
+
   while (!calibrated){
     //waiting for calibrate the stepper motor
     calibrateStepper();
-  }
-
-  while (!paired){
-    //waiting for pairing
-    apiListener();
   }
 
   rfidListener();
@@ -141,38 +163,137 @@ void rfidListener(){
   rfid.PCD_StopCrypto1();
   
   //request verification from control hub
+  verification(uid);
+}
+
+void verification(String uid) {
+  HttpClient client = HttpClient(wifiClient, serverAddress, port);
+
+  Serial.println("making POST request");
+  String contentType = "application/x-www-form-urlencoded";
+  String postData = "uid=" + uid;
+
+  client.post("/", contentType, postData);
+
+  // read the status code and body of the response
+  int statusCode = client.responseStatusCode();
+  String response = client.responseBody();
+
+  Serial.print("Status code: ");
+  Serial.println(statusCode);
+  Serial.print("Response: ");
+  Serial.println(response);
+
+ if(200 == statusCode){
+  updateStatus("UNLOCK");
+  buzzerController("UNLOCK");
+  ledController("UNLOCK");
+ }
+
 }
 
 void calibrateStepper(){
+  // read the state of the pushbutton value:
+  buttonState = digitalRead(BUTTON_PIN);
 
+  // check if the pushbutton is pressed. If it is, the buttonState is HIGH:
+  while (buttonState == HIGH) {
+    myStepper.step(-1*direction);
+    lockStep += 1;
+
+    if (buttonState == LOW) {
+      calibrated = true;
+    }
+  }
+  
 }
 
 void pairing(){
+  // Check if a client has connected
+  WiFiClient client = server.available();
+  if (!client) {
+    return;
+  }
+
+  // Wait until the client sends some data
+  Serial.println("new client");
+  while(!client.available()){
+    delay(1);
+  }
+
+  String req = client.readStringUntil('\r');
+
+  Serial.println(req);
+  client.flush();
+  // Match the request
+
+  String s = "";
+  if (req.indexOf("/pairing") != -1) {
+    //handle the request
+    s = "HTTP/1.1 200 OK";
+    paired = true;
+    direction = 1;
+    serverAddress = "";
+  }
+  else {
+    Serial.println("invalid request");
+    client.stop();
+    return;
+  }
+
+  client.flush();
+  // Send the response to the client
+  client.print(s);
+  delay(1);
+  client.stop();
+  Serial.println("Client disonnected");
 
 }
 
-void updateStatus(){
+void updateStatus(String status){
+  if("LOCK" == status){
+    locked=true;
+  } 
+  else if ("UNLOCK" == status){
+    locked=false;
+  }
 
 }
 
 void doorSwitchListener(){
-
+  
 }
 
 void buttonListener(){
 
 }
 
-void motorController(){
-
+void motorController(String mode){
+  if("LOCK" == mode){
+    myStepper.step(lockStep*direction);
+  } 
+  else if ("UNLOCK" == mode){
+    myStepper.step(lockStep*direction*-1);
+  }
 }
 
-void buzzerController(){
+void buzzerController(String mode){
+  if("LOCK" == mode){
 
+  } 
+  else if ("UNLOCK" == mode){
+
+  }
 }
 
-void ledController(){
+void ledController(String mode){
+  if("LOCK" == mode){
 
+  } else if ("UNLOCK" == mode){
+
+  } else if("UNPAIR" == mode){
+
+  }
 }
 
 void apiListener(){
@@ -194,13 +315,12 @@ void apiListener(){
   client.flush();
   // Match the request
 
+  String s = "";
   if (req.indexOf("/status") != -1) {
     //handle the request
-    updateStatus();
-  }
-  else if (req.indexOf("/pairing") != -1) {
-    //handle the request
-    pairing();
+    String status = "LOCK";
+    updateStatus(status);
+    String s = "HTTP/1.1 200 OK";
   }
   else {
     Serial.println("invalid request");
@@ -209,7 +329,7 @@ void apiListener(){
   }
 
   client.flush();
-  String s = "HTTP/1.1 200 OK";
+  
   // Send the response to the client
   client.print(s);
   delay(1);
