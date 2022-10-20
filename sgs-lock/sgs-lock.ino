@@ -2,11 +2,11 @@
 #include <string>
 #include <MFRC522.h>
 #include <Stepper.h>
-#include <WiFiNINA.h>
+#include <ArduinoJson.h>
+#include <WiFiWebServer.h>
 #include <ArduinoHttpClient.h>
 #include <ArduinoMqttClient.h>
 #include "arduino_secret.h"
-
 
 #define SS_PIN 10
 #define RST_PIN 9
@@ -26,7 +26,6 @@ char ssid[] = SECRET_SSID;
 char pass[] = SECRET_PASS;
 char hostname[] = LOCK_HOST;
 int status = WL_IDLE_STATUS;
-byte mac[6];                     // the MAC address of your WiFi Module
 
 //RFID config
 MFRC522 rfid(SS_PIN, RST_PIN); // Instance of the class
@@ -37,7 +36,7 @@ WiFiClient wifiClient;
 MqttClient mqttClient(wifiClient);
 
 //API config
-WiFiServer server(8080);
+WiFiWebServer server(8080);
 
 // initialize the stepper
 int stepsPerRevolution = 360;
@@ -55,6 +54,7 @@ bool locked = true;
 bool calibrated = false;
 int buttonState = 0; 
 int switchState = 0;
+int selectedModule = -1; // 0: default, 1: RFID, 2: Keypad
 
 void setup() {
   // put your setup code here, to run once:
@@ -65,7 +65,6 @@ void setup() {
 
   //myStepper.setSpeed(5);
 
-  
   //Init Wifi
   initWiFi();
   
@@ -82,12 +81,13 @@ void setup() {
   String keyValue = getHexValue(key.keyByte, MFRC522::MF_KEY_SIZE);
   Serial.print(keyValue);
   
-  /*
-  //Init server 
+  
+  //Init server  
+  server.on(F("/pairing"), HTTP_POST, pairingHandler);
+  server.on(F("/status"), HTTP_POST, statusHandler);
+  server.onNotFound(notFound);
   server.begin();
-  Serial.println("Server started");
-  */
-
+  
   // initialize the outputs:
   pinMode(RED_LED_PIN, OUTPUT);
   pinMode(GREEN_LED_PIN, OUTPUT);
@@ -179,8 +179,6 @@ void loop() {
   while (!paired){
     //waiting for pairing
     ledController("UNPAIR");
-    pairing();
-
   }
 
   while (!calibrated){
@@ -196,10 +194,8 @@ void loop() {
 
   doorSwitchListener();
   buttonListener();
-  apiListener();
+  //apiListener();
 }
-
-
 
 void initWiFi() {
   // check for the WiFi module:
@@ -258,11 +254,16 @@ void verification(String uid, String requestedBy) {
   HttpClient client = HttpClient(wifiClient, serverAddress, port);
 
   Serial.println("making POST request");
-  String contentType = "application/x-www-form-urlencoded";
-  String postData = "uid=" + uid;
-  String requestedBy = "requestedBy=" + requestedBy;
+  String contentType = "application/json";
 
-  client.post("/", contentType, postData);
+  DynamicJsonDocument msgJson(1024);
+  msgJson["uid"] = uid;
+  msgJson["requestedBy"] = requestedBy;
+
+  String msg;
+  serializeJson(msgJson, msg);
+
+  client.post("/", contentType, msg); // TODO: update the API
 
   // read the status code and body of the response
   int statusCode = client.responseStatusCode();
@@ -296,49 +297,6 @@ void calibrateStepper(){
     }
   }
   
-}
-
-void pairing(){
-  //TODO: update the logic
-  // Check if a client has connected
-  WiFiClient client = server.available();
-  if (!client) {
-    return;
-  }
-
-  // Wait until the client sends some data
-  Serial.println("new client");
-  while(!client.available()){
-    delay(1);
-  }
-
-  String req = client.readStringUntil('\r');
-
-  Serial.println(req);
-  client.flush();
-  // Match the request
-
-  String s = "";
-  if (req.indexOf("/pairing") != -1) {
-    //handle the request
-    s = "HTTP/1.1 200 OK";
-    paired = true;
-    direction = 1;
-    serverAddress = "";
-  }
-  else {
-    Serial.println("invalid request");
-    client.stop();
-    return;
-  }
-
-  client.flush();
-  // Send the response to the client
-  client.print(s);
-  delay(1);
-  client.stop();
-  Serial.println("Client disonnected");
-
 }
 
 void updateStatus(String status){
@@ -432,11 +390,11 @@ void motorController(String mode){
 
 void buzzerController(String mode){
   if("LOCK" == mode){
-    tone(BUZZER_PIN, 100, 2)
+    tone(BUZZER_PIN, 100, 2);
   } else if ("UNLOCK" == mode){
-    tone(BUZZER_PIN, 50, 2)
+    tone(BUZZER_PIN, 50, 2);
   } else if ("WARN" == mode){
-    tone(BUZZER_PIN, 10, 2)
+    tone(BUZZER_PIN, 10, 2);
   }
 }
 
@@ -460,55 +418,91 @@ void ledController(String mode){
   }
 }
 
-void rgbColor(int red, int green, int blue){
-  analogWrite(RED_LED_PIN, 255-red);
-  analogWrite(GREEN_LED_PIN, 255-green);
-  analogWrite(BLUE_LED_PIN, 255-blue);
-}
-
-void apiListener(){
-  //TODO: update the logic
-  // Check if a client has connected
-  WiFiClient client = server.available();
-  if (!client) {
+void pairingHandler(){
+  if(paired){
+    server.send(403, F("application/json"), "{\"message\":\"Already paired, please reset the device before pair again.\"}");
     return;
   }
 
-  // Wait until the client sends some data
-  Serial.println("new client");
-  while(!client.available()){
-    delay(1);
-  }
-
-  String req = client.readStringUntil('\r');
-
-  Serial.println(req);
-  client.flush();
-  // Match the request
-
-  String s = "";
-  if (req.indexOf("/status") != -1) {
-    //handle the request
-    String status = "LOCK";
-    updateStatus(status);
-    String s = "HTTP/1.1 200 OK";
-  }
-  else {
-    Serial.println("invalid request");
-    client.stop();
+  if(!server.hasArg("plain")){
+    server.send(204, F("application/json"), "{\"message\":\"Empty request\"}");
     return;
   }
-
-  client.flush();
   
-  // Send the response to the client
-  client.print(s);
-  delay(1);
-  client.stop();
-  Serial.println("Client disonnected");
+  String requestBody = server.arg("plain");
+  DynamicJsonDocument bodyJSON(1024);
+
+  DeserializationError error = deserializeJson(bodyJSON, requestBody);
+  if (error) {
+    Serial.print(F("deserializeJson() failed: "));
+    Serial.println(error.f_str());
+
+    server.send(400, F("application/json"), "{\"message\":\"Invalid Format\"}");
+    return;
+  } 
+
+  serverAddress = (const char*)bodyJSON["contolAddress"]; // "192.192.192.192"
+  direction = bodyJSON["doorDirection"]; // 1
+  selectedModule = bodyJSON["selectedModule"]; // 1
+
+  Serial.println("Received serverAddress: "+ serverAddress);
+  Serial.println("Received doorDirection: "+ direction);
+  Serial.println("Received selectedModule: "+ selectedModule);
+
+  if(serverAddress != "" && direction != 0 && selectedModule != -1){
+    paired = true;
+    server.send(200, F("application/json"), "{\"message\":\"Success\"}");
+  } else {
+    server.send(400, F("application/json"), "{\"message\":\"Invalid Format\"}");
+  }
 }
 
+void statusHandler(){
+  if(!paired || !calibrated){
+    server.send(403, F("application/json"), "{\"message\":\"Not paired or calibrated device.\"}");
+    return;
+  }
 
+  if(!server.hasArg("plain")){
+    server.send(204, F("application/json"), "{\"message\":\"Empty request\"}");
+    return;
+  }
+  
+  String requestBody = server.arg("plain");
+  DynamicJsonDocument bodyJSON(1024);
+
+  DeserializationError error = deserializeJson(bodyJSON, requestBody);
+  if (error) {
+    Serial.print(F("deserializeJson() failed: "));
+    Serial.println(error.f_str());
+
+    server.send(400, F("application/json"), "{\"message\":\"Invalid Format\"}");
+    return;
+  } 
+
+  String newStatus = bodyJSON["status"];
+  Serial.println("Received newStatus: "+ newStatus);
+
+  if("LOCK" == newStatus){
+    motorController("LOCK");
+    ledController("LOCK");
+    buzzerController("LOCK");
+    server.send(200, F("application/json"), "{\"message\":\"Success\"}");
+  } else if("UNLOCK" == newStatus){
+    motorController("UNLOCK");
+    ledController("UNLOCK");
+    buzzerController("UNLOCK");
+    server.send(200, F("application/json"), "{\"message\":\"Success\"}");
+  } else {
+    server.send(400, F("application/json"), "{\"message\":\"Invalid value\"}");
+  }
+}
+
+void notFound() {
+  server.send(404, F("application/json"), "{\"message\":\"Not found\"}");
+}
+
+//Utils methods
 String getHexValue(byte *buffer, byte bufferSize) {
   String result = "";
 
@@ -521,4 +515,9 @@ String getHexValue(byte *buffer, byte bufferSize) {
 }
 
 
+void rgbColor(int red, int green, int blue){
+  analogWrite(RED_LED_PIN, 255-red);
+  analogWrite(GREEN_LED_PIN, 255-green);
+  analogWrite(BLUE_LED_PIN, 255-blue);
+}
 
