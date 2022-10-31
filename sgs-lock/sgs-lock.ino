@@ -16,10 +16,10 @@
 #define BUTTON_PIN 21
 #define SWITCH_PIN 16
 #define BUZZER_PIN 1
-#define STEPPER_PIN_1 20
-#define STEPPER_PIN_2 19
-#define STEPPER_PIN_3 18
-#define STEPPER_PIN_4 17
+#define STEPPER_PIN_1 8
+#define STEPPER_PIN_2 7
+#define STEPPER_PIN_3 6
+#define STEPPER_PIN_4 5
 
 //wifi config
 char ssid[] = SECRET_SSID;
@@ -34,13 +34,23 @@ MFRC522::MIFARE_Key key;
 //MQTT config
 WiFiClient wifiClient;
 MqttClient mqttClient(wifiClient);
+char mqtt_un[] = MQTT_UN;
+char mqtt_pw[] = MQTT_PW;
+
+const char topic[]  = "sgs-lock/status";
+int mqtt_port = 1883;
+
+const long interval = 1000;
+unsigned long previousMillis = 0;
 
 //API config
 WiFiWebServer server(8080);
 
 // initialize the stepper
-int stepsPerRevolution = 360;
-Stepper myStepper(stepsPerRevolution, STEPPER_PIN_1, STEPPER_PIN_2, STEPPER_PIN_3, STEPPER_PIN_4);
+const int STEP_PRE_REV = 32;
+const int GEAR_RED = 64;
+const int STEP_PRE_OUT_REV = STEP_PRE_REV * GEAR_RED;
+Stepper myStepper(STEP_PRE_REV, STEPPER_PIN_1, STEPPER_PIN_3, STEPPER_PIN_2, STEPPER_PIN_4);
 int lockStep = 0;
 int direction = 1; // if door direction is left, set it as -1
 
@@ -63,10 +73,10 @@ void setup() {
     ;
   }
 
-  //myStepper.setSpeed(5);
+  myStepper.setSpeed(700);
 
   //Init Wifi
-  initWiFi();
+  //initWiFi();
   
   SPI.begin(); // Init SPI bus
 
@@ -101,10 +111,8 @@ void setup() {
 }
 
 //testing loop
-void test_loop() {
-  delay(5000);
-
-
+void loop() {
+  
   //test RGB LED
   Serial.println("Green Light");
   ledController("UNLOCK");
@@ -123,18 +131,28 @@ void test_loop() {
   delay(5000);
   ledController("");
   delay(1000);
+  
+
+  /*
+  calibrateStepper();
+  if(calibrated == true){
+    Serial.println(lockStep);
+    buttonListener();
+  }
+  */
 
   /*
   //test stepper motor
-  myStepper.step(90);
+  myStepper.step(STEP_PRE_OUT_REV/4);
   delay(1000);
-  myStepper.step(-90);
+  myStepper.step(-STEP_PRE_OUT_REV/4);
   delay(1000);
-  myStepper.step(180);
+  myStepper.step(STEP_PRE_OUT_REV/2);
   delay(1000);
-  myStepper.step(-180);
+  myStepper.step(-STEP_PRE_OUT_REV/2);
   */
 
+  /*
   String uid = rfidListener();
   while (""==uid){
     uid = rfidListener();
@@ -155,7 +173,9 @@ void test_loop() {
 
     delay(1000);
   }
+  */
 
+  /*
   //test magnetic door switch
   switchState = digitalRead(SWITCH_PIN);
   while (switchState == LOW) {
@@ -168,13 +188,11 @@ void test_loop() {
 
     delay(1000);
   }
-  
-  Serial.println("Testing Complete");
-  Serial.println("----------------");
+  */
 
 }
 
-void loop() {
+void loop_prod() {
 
   while (!paired){
     //waiting for pairing
@@ -194,7 +212,7 @@ void loop() {
 
   doorSwitchListener();
   buttonListener();
-  //apiListener();
+  publish_status();
 }
 
 void initWiFi() {
@@ -283,6 +301,10 @@ void verification(String uid, String requestedBy) {
 }
 
 void calibrateStepper(){
+  if(calibrated == true){
+    return;
+  }
+
   // read the state of the pushbutton value:
   buttonState = digitalRead(BUTTON_PIN);
 
@@ -318,6 +340,7 @@ void doorSwitchListener(){
 
     switchState = digitalRead(SWITCH_PIN);
     if (switchState == HIGH) {
+      locked = true;
       Serial.println("Door closed");
       return;
     } else {
@@ -449,6 +472,26 @@ void pairingHandler(){
   Serial.println("Received doorDirection: "+ direction);
   Serial.println("Received selectedModule: "+ selectedModule);
 
+  mqttClient.setId(hostname);
+  mqttClient.setUsernamePassword(mqtt_un, mqtt_pw);
+
+  Serial.print("Attempting to connect to the MQTT broker: ");
+  Serial.println(serverAddress);
+
+  int strLen = serverAddress.length() + 1; 
+  char serverAddressArray[strLen];
+  serverAddress.toCharArray(serverAddressArray, strLen);
+
+  if (!mqttClient.connect(serverAddressArray, mqtt_port)) {
+    Serial.print("MQTT connection failed! Error code = ");
+    Serial.println(mqttClient.connectError());
+    server.send(403, F("application/json"), "{\"message\":\"Failed to connect MQTT broker, please check and pair again\"}");
+    return;
+  }
+
+  Serial.println("You're connected to the MQTT broker!");
+  Serial.println();
+
   if(serverAddress != "" && direction != 0 && selectedModule != -1){
     paired = true;
     server.send(200, F("application/json"), "{\"message\":\"Success\"}");
@@ -500,6 +543,35 @@ void statusHandler(){
 
 void notFound() {
   server.send(404, F("application/json"), "{\"message\":\"Not found\"}");
+}
+
+void publish_status() {
+  // call poll() regularly to allow the library to send MQTT keep alives which
+  // avoids being disconnected by the broker
+  mqttClient.poll();
+
+  // to avoid having delays in loop, we'll use the strategy from BlinkWithoutDelay
+  // see: File -> Examples -> 02.Digital -> BlinkWithoutDelay for more info
+  unsigned long currentMillis = millis();
+  
+  if (currentMillis - previousMillis >= interval) {
+    // save the last time a message was sent
+    previousMillis = currentMillis;
+
+    Serial.print("Sending message to topic: ");
+    Serial.println(topic);
+
+    // send message, the Print interface can be used to set the message contents
+    mqttClient.beginMessage(topic);
+    mqttClient.println("deviceID:" + String(hostname));
+    if(locked){
+      mqttClient.println("status:LOCKED");
+    } else {
+      mqttClient.println("status:UNLOCKED");
+    }
+      
+    mqttClient.endMessage();
+  }
 }
 
 //Utils methods
