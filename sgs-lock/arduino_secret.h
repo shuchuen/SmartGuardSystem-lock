@@ -1,5 +1,3 @@
 #define SECRET_SSID ""
 #define SECRET_PASS ""
-#define LOCK_HOST "lock1.sgs"
-#define MQTT_UN "sgs"
-#define MQTT_PW "mqttp@ssw0rd"
+#define LOCK_HOST "lock.sgs"

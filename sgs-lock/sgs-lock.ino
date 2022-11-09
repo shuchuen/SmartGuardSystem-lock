@@ -3,19 +3,19 @@
 #include <MFRC522.h>
 #include <Stepper.h>
 #include <ArduinoJson.h>
-#include <WiFiWebServer.h>
 #include <ArduinoHttpClient.h>
 #include <ArduinoMqttClient.h>
 #include "arduino_secret.h"
+#include <WiFiWebServer.h>
 
 #define SS_PIN 10
 #define RST_PIN 9
-#define RED_LED_PIN 2
-#define GREEN_LED_PIN 3
-#define BLUE_LED_PIN 4
-#define BUTTON_PIN 21
+#define RED_PIN 2
+#define GREEN_PIN 3
+#define BLUE_PIN 4
+#define BUTTON_PIN 20
 #define SWITCH_PIN 16
-#define BUZZER_PIN 1
+#define BUZZER_PIN 18
 #define STEPPER_PIN_1 8
 #define STEPPER_PIN_2 7
 #define STEPPER_PIN_3 6
@@ -25,6 +25,7 @@
 char ssid[] = SECRET_SSID;
 char pass[] = SECRET_PASS;
 char hostname[] = LOCK_HOST;
+String lockID;
 int status = WL_IDLE_STATUS;
 
 //RFID config
@@ -34,11 +35,9 @@ MFRC522::MIFARE_Key key;
 //MQTT config
 WiFiClient wifiClient;
 MqttClient mqttClient(wifiClient);
-char mqtt_un[] = MQTT_UN;
-char mqtt_pw[] = MQTT_PW;
 
 const char topic[]  = "sgs-lock/status";
-int mqtt_port = 1883;
+int mqttPort = 1883;
 
 const long interval = 1000;
 unsigned long previousMillis = 0;
@@ -60,11 +59,12 @@ int port = 8080;
 
 //variables 
 bool paired = false;
-bool locked = true;
+bool locked = false;
 bool calibrated = false;
 int buttonState = 0; 
 int switchState = 0;
 int selectedModule = -1; // 0: default, 1: RFID, 2: Keypad
+
 
 void setup() {
   // put your setup code here, to run once:
@@ -76,12 +76,13 @@ void setup() {
   myStepper.setSpeed(700);
 
   //Init Wifi
-  //initWiFi();
-  
+  initWiFi();
   SPI.begin(); // Init SPI bus
 
   // Init MFRC522 
   rfid.PCD_Init(); // Init MFRC522 
+  delay(4);
+  rfid.PCD_DumpVersionToSerial();	// Show details of PCD - MFRC522 Card Reader details
   for (byte i = 0; i < 6; i++) {
     key.keyByte[i] = 0xFF;
   }
@@ -89,7 +90,7 @@ void setup() {
   Serial.println(F("This code scan the MIFARE Classsic NUID."));
   Serial.print(F("Using the following key:"));
   String keyValue = getHexValue(key.keyByte, MFRC522::MF_KEY_SIZE);
-  Serial.print(keyValue);
+  Serial.println(keyValue);
   
   
   //Init server  
@@ -97,12 +98,15 @@ void setup() {
   server.on(F("/status"), HTTP_POST, statusHandler);
   server.onNotFound(notFound);
   server.begin();
+
+  Serial.print(F("HTTP server started @ "));
+  Serial.println(WiFi.localIP());
   
   // initialize the outputs:
-  pinMode(RED_LED_PIN, OUTPUT);
-  pinMode(GREEN_LED_PIN, OUTPUT);
-  pinMode(BLUE_LED_PIN, OUTPUT);
-  //pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(RED_PIN, OUTPUT);
+  pinMode(GREEN_PIN, OUTPUT);
+  pinMode(BLUE_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
 
   // initialize the inputs:
   pinMode(BUTTON_PIN, INPUT);
@@ -111,27 +115,44 @@ void setup() {
 }
 
 //testing loop
-void loop() {
+void test_loop() {
   
+  digitalWrite(BUZZER_PIN, HIGH);
+
   //test RGB LED
   Serial.println("Green Light");
-  ledController("UNLOCK");
+  ledController(F("UNLOCK"));
+  //buzzerController(F("UNLOCK"));
   delay(5000);
-  ledController("");
-  delay(1000);
 
   Serial.println("Red Light");
-  ledController("LOCK");
+  ledController(F("LOCK"));
+  //buzzerController(F("LOCK"));
   delay(5000);
-  ledController("");
-  delay(1000);
 
   Serial.println("Yellow Light");
   ledController("UNPAIR");
   delay(5000);
-  ledController("");
-  delay(1000);
+
+  Serial.println("Warning Light");
+  ledController(F("WARN"));
+  //buzzerController(F("WARN"));
+  delay(5000);
   
+
+  /*
+  Serial.println(F("LOCK"));
+  buzzerController(F("LOCK"));
+  delay(10000);
+
+  Serial.println(F("UNLOCK"));
+  buzzerController(F("UNLOCK"));
+  delay(10000);
+
+  Serial.println(F("WARN"));
+  buzzerController(F("WARN"));
+  delay(10000);
+  */
 
   /*
   calibrateStepper();
@@ -192,33 +213,41 @@ void loop() {
 
 }
 
-void loop_prod() {
+void loop() {
 
-  while (!paired){
+  if (!paired){
     //waiting for pairing
     ledController("UNPAIR");
-  }
+    server.handleClient();
+    return;
+  } 
 
-  while (!calibrated){
+  ledController("OFF");
+
+  if (!calibrated){
     //waiting for calibrate the stepper motor
     calibrateStepper();
+    return;
   }
 
   String uid = rfidListener();
   //request verification from control hub if uid != NULL
   if (""!=uid){
-    verification(uid, hostname);
+    verification(uid, lockID);
   }
 
   doorSwitchListener();
   buttonListener();
   publish_status();
+  server.handleClient();
+  ledController("OFF");
+
 }
 
 void initWiFi() {
   // check for the WiFi module:
   if (WiFi.status() == WL_NO_MODULE) {
-    Serial.println("Communication with WiFi module failed!");
+    Serial.println(F("Communication with WiFi module failed!"));
     // don't continue
     while (true);
   }
@@ -226,24 +255,38 @@ void initWiFi() {
   WiFi.setHostname(hostname);
   // attempt to connect to Wifi network:
   while (status != WL_CONNECTED) {
-    Serial.print("Attempting to connect to SSID: ");
+    Serial.print(F("Attempting to connect to SSID: "));
     Serial.println(ssid);
     status = WiFi.begin(ssid, pass);
     // wait 10 seconds for connection:
     delay(10000);
   }
 
-  Serial.println("Connected to wifi");
+  byte mac[6];
+  WiFi.macAddress(mac);
+
+  for(int i=sizeof(mac)-1 ; i>=0 ; i--){
+    lockID.concat(String(mac[i], HEX));
+  }
+
+  Serial.println(F("Connected to wifi"));
 }
 
 String rfidListener(){
-  // Reset the loop if no new card present on the sensor/reader. This saves the entire process when idle.
+  if(!locked){
+    return "";
+  }
+
+  // Reset the loop if no new card present on the sensor/reader. 
+  // This saves the entire process when idle.
   if ( ! rfid.PICC_IsNewCardPresent())
     return "";
 
   // Verify if the NUID has been readed
   if ( ! rfid.PICC_ReadCardSerial())
     return "";
+  
+  //rfid.PICC_DumpToSerial(&(rfid.uid));
 
   Serial.print(F("PICC type: "));
   MFRC522::PICC_Type piccType = rfid.PICC_GetType(rfid.uid.sak);
@@ -258,7 +301,8 @@ String rfidListener(){
   }
 
   String uid = getHexValue(rfid.uid.uidByte, rfid.uid.size);
-  
+  Serial.print(F("uid ="));
+  Serial.println(uid);
   // Halt PICC
   rfid.PICC_HaltA();
 
@@ -271,31 +315,32 @@ String rfidListener(){
 void verification(String uid, String requestedBy) {
   HttpClient client = HttpClient(wifiClient, serverAddress, port);
 
-  Serial.println("making POST request");
+  Serial.println(F("making POST request"));
   String contentType = "application/json";
 
-  DynamicJsonDocument msgJson(1024);
-  msgJson["uid"] = uid;
-  msgJson["requestedBy"] = requestedBy;
+  StaticJsonDocument<96> msgJson;
+  msgJson["cardId"] = uid;
+  msgJson["deviceId"] = requestedBy;
 
   String msg;
   serializeJson(msgJson, msg);
+  String url = String(serverAddress + "/lock/verify");
 
-  client.post("/", contentType, msg); // TODO: update the API
+  client.post(url, contentType, msg);
 
   // read the status code and body of the response
   int statusCode = client.responseStatusCode();
   String response = client.responseBody();
 
-  Serial.print("Status code: ");
+  Serial.print(F("Status code: "));
   Serial.println(statusCode);
-  Serial.print("Response: ");
+  Serial.print(F("Response: "));
   Serial.println(response);
 
   if(200 == statusCode){
-    motorController("UNLOCK");
-    ledController("UNLOCK");
-    buzzerController("UNLOCK");
+    motorController(F("UNLOCK"));
+    ledController(F("UNLOCK"));
+    buzzerController(F("UNLOCK"));
   }
 
 }
@@ -316,33 +361,38 @@ void calibrateStepper(){
     buttonState = digitalRead(BUTTON_PIN);
     if (buttonState == LOW) {
       calibrated = true;
+      locked = false;
     }
   }
   
 }
 
 void updateStatus(String status){
-  if("LOCK" == status){
+  if(F("LOCK") == status){
     locked=true;
   } 
-  else if ("UNLOCK" == status){
+  else if (F("UNLOCK") == status){
     locked=false;
   }
 
 }
 
 void doorSwitchListener(){
+
+  if(locked){
+    return;
+  }
+
   switchState = digitalRead(SWITCH_PIN);
   int count = 0;
 
   while (switchState == LOW && count < 5) {
     Serial.println("Door opened");
-
     switchState = digitalRead(SWITCH_PIN);
     if (switchState == HIGH) {
-      locked = true;
       Serial.println("Door closed");
-      return;
+      count = 0;
+      break;
     } else {
       count += 1;
     }
@@ -351,20 +401,25 @@ void doorSwitchListener(){
 
   if (count == 5){ // warning after 5 seconds
     while (switchState == LOW){
-      ledController("WARN");
-      buzzerController("WARN");
+      ledController(F("WARN"));
+      buzzerController(F("WARN"));
+      buttonListener();
       switchState = digitalRead(SWITCH_PIN);
+
+      if(locked){
+        return;
+      }
     }
     Serial.println("Door closed");
     return;
   }
 
+  count = 0;
   while (switchState == HIGH && !locked) {
-    Serial.println("Door closed but not lock");
-
+    Serial.println(F("Door closed but not lock yet"));
     switchState = digitalRead(SWITCH_PIN);
     if (switchState == LOW) {
-      Serial.println("Door opened");
+      Serial.println(F("Door opened"));
       return;
     } else {
       count += 1;
@@ -372,10 +427,12 @@ void doorSwitchListener(){
     delay(1000);
 
     if (count == 3){ // auto lock after 3 seconds
-      motorController("LOCK");
-      ledController("LOCK");
-      buzzerController("LOCK");
-      Serial.println("Door locked");
+      motorController(F("LOCK"));
+      ledController(F("LOCK"));
+      buzzerController(F("LOCK"));
+      Serial.println(F("Door locked"));
+
+      return;
     }
   }
 }
@@ -386,128 +443,159 @@ void buttonListener(){
     buttonState = digitalRead(BUTTON_PIN);
     if(buttonState == LOW){ //Pressed and released the button
       if(!locked){
-        motorController("LOCK");
-        ledController("LOCK");
-        buzzerController("LOCK");
-        Serial.println("Door locked");
+        motorController(F("LOCK"));
+        buzzerController(F("LOCK"));
+        ledController(F("LOCK"));
+        Serial.println(F("Door locked"));
       } else {
-        motorController("UNLOCK");
-        ledController("UNLOCK");
-        buzzerController("UNLOCK");
-        Serial.println("Door unlocked");
+        motorController(F("UNLOCK"));
+        buzzerController(F("UNLOCK"));
+        ledController(F("UNLOCK"));
+        Serial.println(F("Door unlocked"));
       }
     }
   }
 }
 
 void motorController(String mode){
-  if("LOCK" == mode){
+  if(F("LOCK") == mode){
     myStepper.step(lockStep*direction);
-    updateStatus("LOCK");
+    updateStatus(F("LOCK"));
   } 
-  else if ("UNLOCK" == mode){
+  else if (F("UNLOCK") == mode){
     myStepper.step(lockStep*direction*-1);
-    updateStatus("UNLOCK");
+    updateStatus(F("UNLOCK"));
   }
 }
 
 void buzzerController(String mode){
-  if("LOCK" == mode){
-    tone(BUZZER_PIN, 100, 2);
-  } else if ("UNLOCK" == mode){
-    tone(BUZZER_PIN, 50, 2);
-  } else if ("WARN" == mode){
-    tone(BUZZER_PIN, 10, 2);
+  if(F("LOCK") == mode){
+    newTone(BUZZER_PIN, 1, 500);
+  } else if (F("UNLOCK") == mode){
+    newTone(BUZZER_PIN, 2, 250);
+  } else if (F("WARN") == mode){
+    newTone(BUZZER_PIN, 3, 100);
   }
 }
 
 void ledController(String mode){
-  if("LOCK" == mode){
+  if(F("LOCK") == mode){
     //show red light
     rgbColor(255, 0, 0);
-  } else if ("UNLOCK" == mode){
+    delay(500);
+    rgbColor(0, 0, 0);
+  } else if (F("UNLOCK") == mode){
     //show green light
     rgbColor(0, 255, 0);
+    delay(500);
+    rgbColor(0, 0, 0);
   } else if("UNPAIR" == mode){
     // show yellow light
     rgbColor(255, 255, 0);
-  } else if ("WARN" == mode){
+    delay(500);
+    rgbColor(0, 0, 0);
+
+  } else if(F("WARN") == mode){
     rgbColor(255, 0, 0);
-    rgbColor(255, 255, 255);
-    rgbColor(255, 0, 0);
-    rgbColor(255, 255, 255);
+    delay(250);
+    rgbColor(255, 255, 0);
+    delay(250);
+  } else if("OFF" == mode){
+    rgbColor(0, 0, 0);
   } else {
     rgbColor(255, 255, 255);
   }
 }
 
 void pairingHandler(){
+  Serial.println(F("Received pairing request"));
+
   if(paired){
-    server.send(403, F("application/json"), "{\"message\":\"Already paired, please reset the device before pair again.\"}");
+    server.send(403, F("application/json"), F("{\"message\":\"Already paired, please reset the device before pair again.\"}"));
     return;
   }
 
   if(!server.hasArg("plain")){
-    server.send(204, F("application/json"), "{\"message\":\"Empty request\"}");
+    server.send(204, F("application/json"), F("{\"message\":\"Empty request\"}"));
     return;
   }
   
   String requestBody = server.arg("plain");
-  DynamicJsonDocument bodyJSON(1024);
+  Serial.println("requestBody:" + requestBody);
+  //DynamicJsonDocument bodyJSON(2048);
+  StaticJsonDocument<512> bodyJSON;
 
   DeserializationError error = deserializeJson(bodyJSON, requestBody);
   if (error) {
     Serial.print(F("deserializeJson() failed: "));
     Serial.println(error.f_str());
 
-    server.send(400, F("application/json"), "{\"message\":\"Invalid Format\"}");
+    server.send(400, F("application/json"), F("{\"message\":\"Invalid Format\"}"));
     return;
-  } 
-
-  serverAddress = (const char*)bodyJSON["contolAddress"]; // "192.192.192.192"
+  }
+  
+  serverAddress = (const char*)bodyJSON["serverAddress"]; // "192.192.192.192"
+  port = bodyJSON["serverPort"]; // 8080
   direction = bodyJSON["doorDirection"]; // 1
   selectedModule = bodyJSON["selectedModule"]; // 1
+  const char* mqttUsername = bodyJSON["mqttUsername"]; 
+  const char* mqttPassword = bodyJSON["mqttPassword"]; 
 
-  Serial.println("Received serverAddress: "+ serverAddress);
-  Serial.println("Received doorDirection: "+ direction);
-  Serial.println("Received selectedModule: "+ selectedModule);
+  Serial.print(F("Received serverAddress: "));
+  Serial.println(serverAddress);
+  Serial.print(F("Received serverPort: "));
+  Serial.println(String(port));
+  Serial.print(F("Received doorDirection: "));
+  Serial.println(String(direction));
+  Serial.print(F("Received selectedModule: "));
+  Serial.println(String(selectedModule));
+  Serial.print(F("Received mqttUsername: "));
+  Serial.println(mqttUsername);
+  Serial.print(F("Received mqttPassword: "));
+  Serial.println(mqttPassword);
 
-  mqttClient.setId(hostname);
-  mqttClient.setUsernamePassword(mqtt_un, mqtt_pw);
+  mqttClient.setId(lockID);
+  mqttClient.setUsernamePassword(mqttUsername, mqttPassword);
 
-  Serial.print("Attempting to connect to the MQTT broker: ");
+  Serial.print(F("Attempting to connect to the MQTT broker: "));
   Serial.println(serverAddress);
 
   int strLen = serverAddress.length() + 1; 
   char serverAddressArray[strLen];
   serverAddress.toCharArray(serverAddressArray, strLen);
 
-  if (!mqttClient.connect(serverAddressArray, mqtt_port)) {
-    Serial.print("MQTT connection failed! Error code = ");
+  if (!mqttClient.connect(serverAddressArray, mqttPort)) {
+    Serial.print(F("MQTT connection failed! Error code = "));
     Serial.println(mqttClient.connectError());
-    server.send(403, F("application/json"), "{\"message\":\"Failed to connect MQTT broker, please check and pair again\"}");
+    server.send(403, F("application/json"), F("{\"message\":\"Failed to connect MQTT broker, please check and pair again\"}"));
     return;
   }
 
-  Serial.println("You're connected to the MQTT broker!");
-  Serial.println();
+  Serial.println(F("You're connected to the MQTT broker!"));
 
   if(serverAddress != "" && direction != 0 && selectedModule != -1){
     paired = true;
-    server.send(200, F("application/json"), "{\"message\":\"Success\"}");
+
+    DynamicJsonDocument msgJson(1024);
+    msgJson["deviceID"] = lockID;
+
+    String msg;
+    serializeJson(msgJson, msg);
+
+    server.send(200, F("application/json"), msg);
   } else {
-    server.send(400, F("application/json"), "{\"message\":\"Invalid Format\"}");
+    server.send(400, F("application/json"), F("{\"message\":\"Invalid Format\"}"));
   }
 }
 
 void statusHandler(){
   if(!paired || !calibrated){
-    server.send(403, F("application/json"), "{\"message\":\"Not paired or calibrated device.\"}");
+    server.send(403, F("application/json"), F("{\"message\":\"Not paired or calibrated device.\"}"));
     return;
   }
 
   if(!server.hasArg("plain")){
-    server.send(204, F("application/json"), "{\"message\":\"Empty request\"}");
+    server.send(204, F("application/json"), F("{\"message\":\"Empty request\"}"));
     return;
   }
   
@@ -519,30 +607,31 @@ void statusHandler(){
     Serial.print(F("deserializeJson() failed: "));
     Serial.println(error.f_str());
 
-    server.send(400, F("application/json"), "{\"message\":\"Invalid Format\"}");
+    server.send(400, F("application/json"), F("{\"message\":\"Invalid Format\"}"));
     return;
   } 
 
   String newStatus = bodyJSON["status"];
-  Serial.println("Received newStatus: "+ newStatus);
+  Serial.print(F("Received newStatus: "));
+  Serial.println(newStatus);
 
-  if("LOCK" == newStatus){
-    motorController("LOCK");
-    ledController("LOCK");
-    buzzerController("LOCK");
-    server.send(200, F("application/json"), "{\"message\":\"Success\"}");
-  } else if("UNLOCK" == newStatus){
-    motorController("UNLOCK");
-    ledController("UNLOCK");
-    buzzerController("UNLOCK");
-    server.send(200, F("application/json"), "{\"message\":\"Success\"}");
+  if(F("LOCK") == newStatus){
+    motorController(F("LOCK"));
+    ledController(F("LOCK"));
+    buzzerController(F("LOCK"));
+    server.send(200, F("application/json"), F("{\"message\":\"Success\"}"));
+  } else if(F("UNLOCK") == newStatus){
+    motorController(F("UNLOCK"));
+    ledController(F("UNLOCK"));
+    buzzerController(F("UNLOCK"));
+    server.send(200, F("application/json"), F("{\"message\":\"Success\"}"));
   } else {
-    server.send(400, F("application/json"), "{\"message\":\"Invalid value\"}");
+    server.send(400, F("application/json"), F("{\"message\":\"Invalid value\"}"));
   }
 }
 
 void notFound() {
-  server.send(404, F("application/json"), "{\"message\":\"Not found\"}");
+  server.send(404, F("application/json"), F("{\"message\":\"Not found\"}"));
 }
 
 void publish_status() {
@@ -558,18 +647,24 @@ void publish_status() {
     // save the last time a message was sent
     previousMillis = currentMillis;
 
-    Serial.print("Sending message to topic: ");
+    Serial.print(F("Sending message to topic: "));
     Serial.println(topic);
+
+    StaticJsonDocument<96> doc;
+    String jsonStr;
+    doc["deviceID"] = lockID;
+
+    if(locked){
+      doc["status"] = F("LOCKED");
+    } else {
+      doc["status"] = F("UNLOCKED");
+    }
+    
+    serializeJson(doc, jsonStr);
 
     // send message, the Print interface can be used to set the message contents
     mqttClient.beginMessage(topic);
-    mqttClient.println("deviceID:" + String(hostname));
-    if(locked){
-      mqttClient.println("status:LOCKED");
-    } else {
-      mqttClient.println("status:UNLOCKED");
-    }
-      
+    mqttClient.println(jsonStr);
     mqttClient.endMessage();
   }
 }
@@ -586,10 +681,19 @@ String getHexValue(byte *buffer, byte bufferSize) {
   return result;
 }
 
-
 void rgbColor(int red, int green, int blue){
-  analogWrite(RED_LED_PIN, 255-red);
-  analogWrite(GREEN_LED_PIN, 255-green);
-  analogWrite(BLUE_LED_PIN, 255-blue);
+  analogWrite(RED_PIN, 255-red);
+  analogWrite(GREEN_PIN, 255-green);
+  analogWrite(BLUE_PIN, 255-blue);
+}
+
+void newTone(int buzzPin, int freq, int length){
+  for(int i = 0; i< freq; i++){
+    digitalWrite(buzzPin, HIGH);
+    delay(length);
+    digitalWrite(buzzPin, LOW);
+    delay(1);
+  }
+
 }
 
