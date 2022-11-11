@@ -1,12 +1,15 @@
 #include <SPI.h>
 #include <string>
-#include <MFRC522.h>
 #include <Stepper.h>
 #include <ArduinoJson.h>
 #include <ArduinoHttpClient.h>
 #include <ArduinoMqttClient.h>
 #include "arduino_secret.h"
 #include <WiFiWebServer.h>
+#include <MFRC522v2.h>
+#include <MFRC522DriverSPI.h>
+#include <MFRC522DriverPinSimple.h>
+#include <MFRC522Debug.h>
 
 #define SS_PIN 10
 #define RST_PIN 9
@@ -14,7 +17,7 @@
 #define GREEN_PIN 3
 #define BLUE_PIN 4
 #define BUTTON_PIN 20
-#define SWITCH_PIN 16
+#define SWITCH_PIN 15
 #define BUZZER_PIN 18
 #define STEPPER_PIN_1 8
 #define STEPPER_PIN_2 7
@@ -29,8 +32,11 @@ String lockID;
 int status = WL_IDLE_STATUS;
 
 //RFID config
-MFRC522 rfid(SS_PIN, RST_PIN); // Instance of the class
-MFRC522::MIFARE_Key key;
+//MFRC522 rfid(SS_PIN, RST_PIN); // Instance of the class
+//MFRC522::MIFARE_Key key;
+MFRC522DriverPinSimple ss_pin(10); // Configurable, see typical pin layout above.
+MFRC522DriverSPI driver{ss_pin}; // Create SPI driver.
+MFRC522 reader{driver};  // Create MFRC522 instance.
 
 //MQTT config
 WiFiClient wifiClient;
@@ -80,18 +86,7 @@ void setup() {
   SPI.begin(); // Init SPI bus
 
   // Init MFRC522 
-  rfid.PCD_Init(); // Init MFRC522 
-  delay(4);
-  rfid.PCD_DumpVersionToSerial();	// Show details of PCD - MFRC522 Card Reader details
-  for (byte i = 0; i < 6; i++) {
-    key.keyByte[i] = 0xFF;
-  }
-
-  Serial.println(F("This code scan the MIFARE Classsic NUID."));
-  Serial.print(F("Using the following key:"));
-  String keyValue = getHexValue(key.keyByte, MFRC522::MF_KEY_SIZE);
-  Serial.println(keyValue);
-  
+  reader.PCD_Init(); // Init MFRC522  
   
   //Init server  
   server.on(F("/pairing"), HTTP_POST, pairingHandler);
@@ -279,37 +274,22 @@ String rfidListener(){
 
   // Reset the loop if no new card present on the sensor/reader. 
   // This saves the entire process when idle.
-  if ( ! rfid.PICC_IsNewCardPresent())
-    return "";
+  if (reader.PICC_IsNewCardPresent() && reader.PICC_ReadCardSerial()){
 
-  // Verify if the NUID has been readed
-  if ( ! rfid.PICC_ReadCardSerial())
-    return "";
-  
-  //rfid.PICC_DumpToSerial(&(rfid.uid));
+    String uid = getHexValue(reader.uid.uidByte, reader.uid.size);
+    Serial.print(F("uid ="));
+    Serial.println(uid);
 
-  Serial.print(F("PICC type: "));
-  MFRC522::PICC_Type piccType = rfid.PICC_GetType(rfid.uid.sak);
-  Serial.println(rfid.PICC_GetTypeName(piccType));
 
-  // Check is the PICC of Classic MIFARE type
-  if (piccType != MFRC522::PICC_TYPE_MIFARE_MINI &&  
-    piccType != MFRC522::PICC_TYPE_MIFARE_1K &&
-    piccType != MFRC522::PICC_TYPE_MIFARE_4K) {
-    Serial.println(F("Your tag is not of type MIFARE Classic."));
-    return "";
+    // Halt PICC.
+    reader.PICC_HaltA();
+    // Stop encryption on PCD.
+    reader.PCD_StopCrypto1();
+
+    return uid;
   }
-
-  String uid = getHexValue(rfid.uid.uidByte, rfid.uid.size);
-  Serial.print(F("uid ="));
-  Serial.println(uid);
-  // Halt PICC
-  rfid.PICC_HaltA();
-
-  // Stop encryption on PCD
-  rfid.PCD_StopCrypto1();
-
-  return uid;
+  
+  return "";
 }
 
 void verification(String uid, String requestedBy) {
@@ -386,10 +366,11 @@ void doorSwitchListener(){
   switchState = digitalRead(SWITCH_PIN);
   int count = 0;
 
-  while (switchState == LOW && count < 5) {
+  while (switchState == LOW && count < 5 && !locked) {
     Serial.println("Door opened");
+    buttonListener();
     switchState = digitalRead(SWITCH_PIN);
-    if (switchState == HIGH) {
+    if (switchState == HIGH || locked) {
       Serial.println("Door closed");
       count = 0;
       break;
@@ -400,40 +381,27 @@ void doorSwitchListener(){
   }
 
   if (count == 5){ // warning after 5 seconds
-    while (switchState == LOW){
+    while (!locked && switchState == LOW){
       ledController(F("WARN"));
       buzzerController(F("WARN"));
       buttonListener();
       switchState = digitalRead(SWITCH_PIN);
-
-      if(locked){
-        return;
+      if (switchState == HIGH){
+        Serial.println("Door closed");
+        break;
       }
     }
-    Serial.println("Door closed");
-    return;
   }
 
-  count = 0;
-  while (switchState == HIGH && !locked) {
+  if (switchState == HIGH && !locked) {
     Serial.println(F("Door closed but not lock yet"));
-    switchState = digitalRead(SWITCH_PIN);
-    if (switchState == LOW) {
-      Serial.println(F("Door opened"));
-      return;
-    } else {
-      count += 1;
-    }
-    delay(1000);
+    //auto lock after 3 seconds
+    delay(3000); 
+    motorController(F("LOCK"));
+    ledController(F("LOCK"));
+    buzzerController(F("LOCK"));
+    Serial.println(F("Door locked"));
 
-    if (count == 3){ // auto lock after 3 seconds
-      motorController(F("LOCK"));
-      ledController(F("LOCK"));
-      buzzerController(F("LOCK"));
-      Serial.println(F("Door locked"));
-
-      return;
-    }
   }
 }
 
