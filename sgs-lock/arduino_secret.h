@@ -1,3 +1,2 @@
-#define SECRET_SSID ""
-#define SECRET_PASS ""
+#define AP_PASS "sgs.lock.2022"
 #define LOCK_HOST "lock.sgs"

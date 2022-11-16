@@ -2,14 +2,15 @@
 #include <string>
 #include <Stepper.h>
 #include <ArduinoJson.h>
-#include <ArduinoHttpClient.h>
 #include <ArduinoMqttClient.h>
+#include <ArduinoHttpClient.h>
 #include "arduino_secret.h"
 #include <WiFiWebServer.h>
 #include <MFRC522v2.h>
 #include <MFRC522DriverSPI.h>
 #include <MFRC522DriverPinSimple.h>
 #include <MFRC522Debug.h>
+#include <FlashStorage.h>
 
 #define SS_PIN 10
 #define RST_PIN 9
@@ -24,16 +25,30 @@
 #define STEPPER_PIN_3 6
 #define STEPPER_PIN_4 5
 
+//lock config on flash memory
+typedef struct {
+  bool isReady;
+  char ssid[30];
+  char pass[30];
+} Config;
+
+const char* setupPage = 
+#include "setup_page.h"
+;
+
+// Reserve a portion of flash memory to store a "Config" and
+// call it "config_store".
+FlashStorage(config_store, Config);
+
+Config config;
+
 //wifi config
-char ssid[] = SECRET_SSID;
-char pass[] = SECRET_PASS;
 char hostname[] = LOCK_HOST;
+char ap_pass[] = AP_PASS;
 String lockID;
 int status = WL_IDLE_STATUS;
 
 //RFID config
-//MFRC522 rfid(SS_PIN, RST_PIN); // Instance of the class
-//MFRC522::MIFARE_Key key;
 MFRC522DriverPinSimple ss_pin(10); // Configurable, see typical pin layout above.
 MFRC522DriverSPI driver{ss_pin}; // Create SPI driver.
 MFRC522 reader{driver};  // Create MFRC522 instance.
@@ -63,7 +78,8 @@ int direction = 1; // if door direction is left, set it as -1
 String serverAddress = "";  // set after pairing
 int port = 8080;
 
-//variables 
+//variables
+bool isReady = false; 
 bool paired = false;
 bool locked = false;
 bool calibrated = false;
@@ -79,33 +95,55 @@ void setup() {
     ;
   }
 
-  myStepper.setSpeed(700);
+  config = config_store.read();
+  // config.isReady = true;
 
-  //Init Wifi
-  initWiFi();
-  SPI.begin(); // Init SPI bus
+  if(config.isReady) {
+    isReady = config.isReady;
 
-  // Init MFRC522 
-  reader.PCD_Init(); // Init MFRC522  
-  
-  //Init server  
-  server.on(F("/pairing"), HTTP_POST, pairingHandler);
-  server.on(F("/status"), HTTP_POST, statusHandler);
-  server.onNotFound(notFound);
-  server.begin();
+    char ssid[30] = {};
+    char pass[30] = {};
+    strcpy(ssid, config.ssid);
+    strcpy(pass, config.pass);
 
-  Serial.print(F("HTTP server started @ "));
-  Serial.println(WiFi.localIP());
-  
-  // initialize the outputs:
-  pinMode(RED_PIN, OUTPUT);
-  pinMode(GREEN_PIN, OUTPUT);
-  pinMode(BLUE_PIN, OUTPUT);
-  pinMode(BUZZER_PIN, OUTPUT);
 
-  // initialize the inputs:
-  pinMode(BUTTON_PIN, INPUT);
-  pinMode(SWITCH_PIN, INPUT);
+    myStepper.setSpeed(700);
+
+    //Init Wifi
+    initWiFi(ssid, pass);
+    SPI.begin(); // Init SPI bus
+
+    // Init MFRC522 
+    reader.PCD_Init(); // Init MFRC522  
+    
+    //Init server  
+    server.on(F("/pairing"), HTTP_POST, pairingHandler);
+    server.on(F("/status"), HTTP_POST, statusHandler);
+    server.on(F("/reset"), resetHandler);
+    server.onNotFound(notFound);
+    server.begin();
+
+    Serial.print(F("HTTP server started @ "));
+    Serial.println(WiFi.localIP());
+    
+    // initialize the outputs:
+    pinMode(RED_PIN, OUTPUT);
+    pinMode(GREEN_PIN, OUTPUT);
+    pinMode(BLUE_PIN, OUTPUT);
+    pinMode(BUZZER_PIN, OUTPUT);
+
+    // initialize the inputs:
+    pinMode(BUTTON_PIN, INPUT);
+    pinMode(SWITCH_PIN, INPUT);
+  } else {
+    createWiFiAP();
+    Serial.print(F("Access Point IP: "));
+    Serial.println(WiFi.localIP());
+    
+    server.on(F("/"), rootHandler);
+    server.onNotFound(notFound);
+    server.begin();
+  }
 
 }
 
@@ -210,6 +248,11 @@ void test_loop() {
 
 void loop() {
 
+  if(!isReady){
+    server.handleClient();
+    return;
+  }
+
   if (!paired){
     //waiting for pairing
     ledController("UNPAIR");
@@ -239,7 +282,7 @@ void loop() {
 
 }
 
-void initWiFi() {
+void initWiFi(const char* ssid, const char* pass) {
   // check for the WiFi module:
   if (WiFi.status() == WL_NO_MODULE) {
     Serial.println(F("Communication with WiFi module failed!"));
@@ -249,12 +292,17 @@ void initWiFi() {
 
   WiFi.setHostname(hostname);
   // attempt to connect to Wifi network:
-  while (status != WL_CONNECTED) {
-    Serial.print(F("Attempting to connect to SSID: "));
-    Serial.println(ssid);
-    status = WiFi.begin(ssid, pass);
-    // wait 10 seconds for connection:
-    delay(10000);
+  Serial.print(F("Attempting to connect to SSID: "));
+  Serial.println(ssid);
+  status = WiFi.begin(ssid, pass);
+  // wait 10 seconds for connection:
+  delay(10000);
+
+  //Cannot connect the Wifi, restart the board to collect another wifi credential
+  if (status != WL_CONNECTED) {
+    config.isReady = false;
+    config_store.write(config);
+    NVIC_SystemReset();
   }
 
   byte mac[6];
@@ -265,6 +313,21 @@ void initWiFi() {
   }
 
   Serial.println(F("Connected to wifi"));
+}
+
+void createWiFiAP() {
+  Serial.println(F("Creating access point"));
+  IPAddress selfIp = IPAddress (192, 168, 10, 1);
+  uint8_t ap_channel = 2;
+  WiFi.config(selfIp);
+  status = WiFi.beginAP(LOCK_HOST, AP_PASS, ap_channel);
+
+  if (status != WL_AP_LISTENING)
+  {
+    Serial.println(F("Create access point failed"));
+    // don't continue
+    while (true);
+  }
 }
 
 String rfidListener(){
@@ -304,9 +367,7 @@ void verification(String uid, String requestedBy) {
 
   String msg;
   serializeJson(msgJson, msg);
-  String url = String(serverAddress + "/lock/verify");
-
-  client.post(url, contentType, msg);
+  client.post("/lock/verify", contentType, msg);
 
   // read the status code and body of the response
   int statusCode = client.responseStatusCode();
@@ -369,6 +430,7 @@ void doorSwitchListener(){
   while (switchState == LOW && count < 5 && !locked) {
     Serial.println("Door opened");
     buttonListener();
+    publish_status();
     switchState = digitalRead(SWITCH_PIN);
     if (switchState == HIGH || locked) {
       Serial.println("Door closed");
@@ -385,6 +447,7 @@ void doorSwitchListener(){
       ledController(F("WARN"));
       buzzerController(F("WARN"));
       buttonListener();
+      publish_status();
       switchState = digitalRead(SWITCH_PIN);
       if (switchState == HIGH){
         Serial.println("Door closed");
@@ -477,6 +540,7 @@ void ledController(String mode){
 
 void pairingHandler(){
   Serial.println(F("Received pairing request"));
+  
 
   if(paired){
     server.send(403, F("application/json"), F("{\"message\":\"Already paired, please reset the device before pair again.\"}"));
@@ -543,7 +607,7 @@ void pairingHandler(){
 
   if(serverAddress != "" && direction != 0 && selectedModule != -1){
     paired = true;
-
+    
     DynamicJsonDocument msgJson(1024);
     msgJson["deviceID"] = lockID;
 
@@ -600,6 +664,38 @@ void statusHandler(){
 
 void notFound() {
   server.send(404, F("application/json"), F("{\"message\":\"Not found\"}"));
+}
+
+void rootHandler() {
+  if (server.hasArg("ssid")&& server.hasArg("password")) {
+    String ssid = server.arg("ssid");
+    String password = server.arg("password");
+
+    Serial.print(F("The received WiFi credential: "));
+    Serial.println(ssid);
+
+    config = config_store.read();
+    ssid.toCharArray(config.ssid, sizeof(ssid));
+    password.toCharArray(config.pass, sizeof(password));
+    config.isReady = true;
+    config_store.write(config);
+
+    server.send(201, F("text/plain"), F("The device is going to restart. This access point will be disappear if the WiFi credential is correct."));
+    NVIC_SystemReset();
+  }
+  else {
+    // If one of the creds is missing, go back to form page
+    server.send(200, F("text/html"), setupPage);
+  }
+}
+
+void resetHandler(){
+  config = config_store.read();
+  config.isReady = false;
+  config_store.write(config);
+
+  server.send(200, F("text/plain"), F("The device is going to restart. Please setup the device from step 1."));
+  NVIC_SystemReset();
 }
 
 void publish_status() {
