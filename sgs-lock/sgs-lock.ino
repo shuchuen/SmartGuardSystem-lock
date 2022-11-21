@@ -30,17 +30,35 @@ typedef struct {
   bool isReady;
   char ssid[30];
   char pass[30];
-} Config;
+  bool isStandalone;
+} WiFiConfig;
+
+typedef struct {
+  bool isReady;
+  char serverAddress[30];
+  char mqttUserName[30];
+  char mqttPassword[30];
+  int direction;
+  int selectedModule;
+  int port;
+} PairingConfig;
+
 
 const char* setupPage = 
 #include "setup_page.h"
 ;
 
-// Reserve a portion of flash memory to store a "Config" and
-// call it "config_store".
-FlashStorage(config_store, Config);
+const char* standalonePage = 
+#include "standalone_page.h"
+;
 
-Config config;
+// Reserve a portion of flash memory to store a "WiFiConfig" and PairingConfig
+// call it "wifi_store".
+FlashStorage(wifi_store, WiFiConfig);
+FlashStorage(pairing_store, PairingConfig);
+
+WiFiConfig wiFiConfig;
+PairingConfig pairingConfig;
 
 //wifi config
 char hostname[] = LOCK_HOST;
@@ -80,32 +98,44 @@ int port = 8080;
 
 //variables
 bool isReady = false; 
-bool paired = false;
-bool locked = false;
-bool calibrated = false;
+bool isPaired = false;
+bool isLocked = false;
+bool isCalibrated = false;
 int buttonState = 0; 
 int switchState = 0;
 int selectedModule = -1; // 0: default, 1: RFID, 2: Keypad
+bool isStandalone = false;
 
 
 void setup() {
   // put your setup code here, to run once:
   Serial.begin(115200);
-  while (!Serial) {
-    ;
-  }
+  //while (!Serial) {
+  //  ;
+  //}
 
-  config = config_store.read();
-  // config.isReady = true;
+  wiFiConfig = wifi_store.read();
 
-  if(config.isReady) {
-    isReady = config.isReady;
+  if(wiFiConfig.isReady) {
+    isReady = wiFiConfig.isReady;
+    isStandalone = wiFiConfig.isStandalone;
 
     char ssid[30] = {};
     char pass[30] = {};
-    strcpy(ssid, config.ssid);
-    strcpy(pass, config.pass);
+    strcpy(ssid, wiFiConfig.ssid);
+    strcpy(pass, wiFiConfig.pass);
 
+    pairingConfig = pairing_store.read();
+
+    if(pairingConfig.isReady){
+      isPaired = pairingConfig.isReady;
+      serverAddress = String(pairingConfig.serverAddress);
+      port = pairingConfig.port;
+      selectedModule = pairingConfig.selectedModule;
+      direction = pairingConfig.direction;
+
+      setMqttConnection(pairingConfig);
+    }
 
     myStepper.setSpeed(700);
 
@@ -113,11 +143,19 @@ void setup() {
     initWiFi(ssid, pass);
     SPI.begin(); // Init SPI bus
 
-    // Init MFRC522 
-    reader.PCD_Init(); // Init MFRC522  
+    // Init MFRC522
+    if (!isStandalone)
+      reader.PCD_Init(); // Init MFRC522  
     
-    //Init server  
-    server.on(F("/pairing"), HTTP_POST, pairingHandler);
+    //Init server
+    if(!isPaired && !isStandalone){
+      server.on(F("/pairing"), HTTP_POST, pairingHandler);
+    } 
+    
+    if(isStandalone){
+      server.on(F("/standaloneAdmin"), HTTP_GET, standaloneHandler);
+    }
+
     server.on(F("/status"), HTTP_POST, statusHandler);
     server.on(F("/reset"), resetHandler);
     server.onNotFound(notFound);
@@ -253,7 +291,7 @@ void loop() {
     return;
   }
 
-  if (!paired){
+  if (!isPaired && !isStandalone){
     //waiting for pairing
     ledController("UNPAIR");
     server.handleClient();
@@ -262,24 +300,27 @@ void loop() {
 
   ledController("OFF");
 
-  if (!calibrated){
+  if (!isCalibrated){
     //waiting for calibrate the stepper motor
     calibrateStepper();
     return;
   }
 
-  String uid = rfidListener();
-  //request verification from control hub if uid != NULL
-  if (""!=uid){
-    verification(uid, lockID);
+  if(!isStandalone){
+    String uid = rfidListener();
+    //request verification from control hub if uid != NULL
+    if (""!=uid){
+      verification(uid, lockID);
+    }
   }
 
   doorSwitchListener();
   buttonListener();
-  publish_status();
+  if(!isStandalone){
+    publish_status();
+  }
   server.handleClient();
   ledController("OFF");
-
 }
 
 void initWiFi(const char* ssid, const char* pass) {
@@ -300,8 +341,8 @@ void initWiFi(const char* ssid, const char* pass) {
 
   //Cannot connect the Wifi, restart the board to collect another wifi credential
   if (status != WL_CONNECTED) {
-    config.isReady = false;
-    config_store.write(config);
+    wiFiConfig.isReady = false;
+    wifi_store.write(wiFiConfig);
     NVIC_SystemReset();
   }
 
@@ -331,7 +372,7 @@ void createWiFiAP() {
 }
 
 String rfidListener(){
-  if(!locked){
+  if(!isLocked){
     return "";
   }
 
@@ -342,7 +383,6 @@ String rfidListener(){
     String uid = getHexValue(reader.uid.uidByte, reader.uid.size);
     Serial.print(F("uid ="));
     Serial.println(uid);
-
 
     // Halt PICC.
     reader.PICC_HaltA();
@@ -387,7 +427,7 @@ void verification(String uid, String requestedBy) {
 }
 
 void calibrateStepper(){
-  if(calibrated == true){
+  if(isCalibrated == true){
     return;
   }
 
@@ -401,8 +441,8 @@ void calibrateStepper(){
 
     buttonState = digitalRead(BUTTON_PIN);
     if (buttonState == LOW) {
-      calibrated = true;
-      locked = false;
+      isCalibrated = true;
+      isLocked = false;
     }
   }
   
@@ -410,61 +450,61 @@ void calibrateStepper(){
 
 void updateStatus(String status){
   if(F("LOCK") == status){
-    locked=true;
+    isLocked=true;
   } 
   else if (F("UNLOCK") == status){
-    locked=false;
+    isLocked=false;
   }
 
 }
 
 void doorSwitchListener(){
 
-  if(locked){
+  if(isLocked){
     return;
   }
 
   switchState = digitalRead(SWITCH_PIN);
-  int count = 0;
+  unsigned long previousMillis = 0;
 
-  while (switchState == LOW && count < 5 && !locked) {
+  while (switchState == LOW && !isLocked) {
     Serial.println("Door opened");
-    buttonListener();
-    publish_status();
-    switchState = digitalRead(SWITCH_PIN);
-    if (switchState == HIGH || locked) {
-      Serial.println("Door closed");
-      count = 0;
-      break;
-    } else {
-      count += 1;
-    }
-    delay(1000);
-  }
 
-  if (count == 5){ // warning after 5 seconds
-    while (!locked && switchState == LOW){
+    if(previousMillis == 0){
+      previousMillis = millis();
+    }
+
+    unsigned long currentMillis = millis();
+
+    //warning after 5 seconds
+    if(currentMillis - previousMillis >= 5000){
       ledController(F("WARN"));
       buzzerController(F("WARN"));
-      buttonListener();
-      publish_status();
-      switchState = digitalRead(SWITCH_PIN);
-      if (switchState == HIGH){
-        Serial.println("Door closed");
-        break;
-      }
     }
+
+    buttonListener();
+    if(!isStandalone){
+      publish_status();
+    }
+    switchState = digitalRead(SWITCH_PIN);
+    if (switchState == HIGH || isLocked) {
+      Serial.println("Door closed");
+      previousMillis = 0;
+      break;
+    } 
   }
 
-  if (switchState == HIGH && !locked) {
+  if (switchState == HIGH && !isLocked) {
     Serial.println(F("Door closed but not lock yet"));
     //auto lock after 3 seconds
     delay(3000); 
-    motorController(F("LOCK"));
-    ledController(F("LOCK"));
-    buzzerController(F("LOCK"));
-    Serial.println(F("Door locked"));
-
+    switchState = digitalRead(SWITCH_PIN);
+    if (switchState == HIGH && !isLocked){
+      motorController(F("LOCK"));
+      ledController(F("LOCK"));
+      buzzerController(F("LOCK"));
+      Serial.println(F("Door locked"));
+    }
   }
 }
 
@@ -473,7 +513,7 @@ void buttonListener(){
   while (buttonState == HIGH) {
     buttonState = digitalRead(BUTTON_PIN);
     if(buttonState == LOW){ //Pressed and released the button
-      if(!locked){
+      if(!isLocked){
         motorController(F("LOCK"));
         buzzerController(F("LOCK"));
         ledController(F("LOCK"));
@@ -531,10 +571,23 @@ void ledController(String mode){
     delay(250);
     rgbColor(255, 255, 0);
     delay(250);
+
+  } else if(F("RESET") == mode){
+    rgbColor(0, 0, 255);
+    delay(250);
+    rgbColor(0, 255, 255);
+    delay(250);
+    rgbColor(0, 0, 255);
+    delay(250);
+    rgbColor(0, 255, 255);
+    delay(250);
+
   } else if("OFF" == mode){
     rgbColor(0, 0, 0);
+
   } else {
     rgbColor(255, 255, 255);
+
   }
 }
 
@@ -542,7 +595,7 @@ void pairingHandler(){
   Serial.println(F("Received pairing request"));
   
 
-  if(paired){
+  if(isPaired){
     server.send(403, F("application/json"), F("{\"message\":\"Already paired, please reset the device before pair again.\"}"));
     return;
   }
@@ -601,12 +654,23 @@ void pairingHandler(){
     Serial.println(mqttClient.connectError());
     server.send(403, F("application/json"), F("{\"message\":\"Failed to connect MQTT broker, please check and pair again\"}"));
     return;
-  }
+  }  
 
   Serial.println(F("You're connected to the MQTT broker!"));
 
   if(serverAddress != "" && direction != 0 && selectedModule != -1){
-    paired = true;
+    isPaired = true;
+
+    pairingConfig = pairing_store.read();
+    pairingConfig.isReady = true;
+    strcpy(pairingConfig.serverAddress, serverAddressArray);
+    strcpy(pairingConfig.mqttUserName, mqttUsername);
+    strcpy(pairingConfig.mqttPassword, mqttUsername);
+    pairingConfig.direction = direction;
+    pairingConfig.selectedModule = selectedModule;
+    pairingConfig.port = port;
+    pairing_store.write(pairingConfig);
+
     
     DynamicJsonDocument msgJson(1024);
     msgJson["deviceID"] = lockID;
@@ -621,7 +685,7 @@ void pairingHandler(){
 }
 
 void statusHandler(){
-  if(!paired || !calibrated){
+  if(!isStandalone && (!isPaired || !isCalibrated)){
     server.send(403, F("application/json"), F("{\"message\":\"Not paired or calibrated device.\"}"));
     return;
   }
@@ -647,7 +711,7 @@ void statusHandler(){
   Serial.print(F("Received newStatus: "));
   Serial.println(newStatus);
 
-  if(F("LOCK") == newStatus){
+  if(F("LOCK") == newStatus ){
     motorController(F("LOCK"));
     ledController(F("LOCK"));
     buzzerController(F("LOCK"));
@@ -670,15 +734,24 @@ void rootHandler() {
   if (server.hasArg("ssid")&& server.hasArg("password")) {
     String ssid = server.arg("ssid");
     String password = server.arg("password");
+    String mode = server.arg("mode");
 
     Serial.print(F("The received WiFi credential: "));
     Serial.println(ssid);
+    Serial.print(F("The received mode: "));
+    Serial.println(mode);
 
-    config = config_store.read();
-    ssid.toCharArray(config.ssid, sizeof(ssid));
-    password.toCharArray(config.pass, sizeof(password));
-    config.isReady = true;
-    config_store.write(config);
+    wiFiConfig = wifi_store.read();
+    ssid.toCharArray(wiFiConfig.ssid, sizeof(ssid));
+    password.toCharArray(wiFiConfig.pass, sizeof(password));
+    if(F("STANDALONE") == mode){
+      wiFiConfig.isStandalone = true;
+    } else {
+      wiFiConfig.isStandalone = false;
+    }
+    
+    wiFiConfig.isReady = true;
+    wifi_store.write(wiFiConfig);
 
     server.send(201, F("text/plain"), F("The device is going to restart. This access point will be disappear if the WiFi credential is correct."));
     NVIC_SystemReset();
@@ -689,10 +762,24 @@ void rootHandler() {
   }
 }
 
+void standaloneHandler(){
+  server.send(200, F("text/html"), standalonePage);
+}
+
 void resetHandler(){
-  config = config_store.read();
-  config.isReady = false;
-  config_store.write(config);
+  //lock the door before reset the configs
+  if(!isLocked)
+    motorController(F("LOCK"));
+
+  ledController(F("RESET"));
+
+  wiFiConfig = wifi_store.read();
+  wiFiConfig.isReady = false;
+  wifi_store.write(wiFiConfig);
+
+  pairingConfig = pairing_store.read();
+  pairingConfig.isReady = false;
+  pairing_store.write(pairingConfig);
 
   server.send(200, F("text/plain"), F("The device is going to restart. Please setup the device from step 1."));
   NVIC_SystemReset();
@@ -718,7 +805,7 @@ void publish_status() {
     String jsonStr;
     doc["deviceID"] = lockID;
 
-    if(locked){
+    if(isLocked){
       doc["status"] = F("LOCKED");
     } else {
       doc["status"] = F("UNLOCKED");
@@ -759,5 +846,25 @@ void newTone(int buzzPin, int freq, int length){
     delay(1);
   }
 
+}
+
+void setMqttConnection(PairingConfig pairingConfig){
+  mqttClient.setId(lockID);
+  mqttClient.setUsernamePassword(pairingConfig.mqttUserName, pairingConfig.mqttPassword);
+
+  Serial.print(F("Attempting to connect to the MQTT broker: "));
+  Serial.println(pairingConfig.serverAddress);
+
+  if (!mqttClient.connect(pairingConfig.serverAddress, mqttPort)) {
+    Serial.print(F("MQTT connection failed! Error code = "));
+    Serial.println(mqttClient.connectError());
+    pairingConfig.isReady = false;
+    pairing_store.write(pairingConfig);
+
+    //reset the pairing status
+    NVIC_SystemReset();
+  } 
+
+  Serial.println(F("You're connected to the MQTT broker!"));
 }
 

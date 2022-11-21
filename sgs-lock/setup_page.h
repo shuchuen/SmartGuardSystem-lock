@@ -10,7 +10,7 @@ R"(
     </style>
   </head>
   <body>
-    <h3>Enter your WiFi credential</h3>
+    <h3>Enter your WiFi credential and select the function mode</h3>
     <form action="/" method="post">
     <p>
     <label>SSID:&nbsp;</label>
@@ -19,12 +19,10 @@ R"(
     <label>Key:&nbsp;&nbsp;&nbsp;</label>
     <input type="password" maxlength="30" name="password">
     <br>
-    <!--
-    <label>Mode:&nbsp;&nbsp;</label>
-    <input type="radio" name="mode" value="Control Hub" checked><label>Control Hub</label>
-    <input type="radio" name="mode" value="Standalone" disabled><label>Standalone</label>
+    <label>Mode:&nbsp;</label>
+    <input type="radio" name="mode" value="PAIRING" checked><label>Pairing</label>
+    <input type="radio" name="mode" value="STANDALONE"><label>Standalone</label>
     <br>
-    -->
     <br>
     <input type="submit" value="Save">
     </p>
