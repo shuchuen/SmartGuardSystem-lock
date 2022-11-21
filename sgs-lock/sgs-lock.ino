@@ -43,6 +43,11 @@ typedef struct {
   int port;
 } PairingConfig;
 
+typedef struct {
+  char username[30];
+  char password[30];
+} StandaloneConfig;
+
 
 const char* setupPage = 
 #include "setup_page.h"
@@ -56,9 +61,11 @@ const char* standalonePage =
 // call it "wifi_store".
 FlashStorage(wifi_store, WiFiConfig);
 FlashStorage(pairing_store, PairingConfig);
+FlashStorage(standalone_store, StandaloneConfig);
 
 WiFiConfig wiFiConfig;
 PairingConfig pairingConfig;
+StandaloneConfig standaloneConfig;
 
 //wifi config
 char hostname[] = LOCK_HOST;
@@ -711,12 +718,12 @@ void statusHandler(){
   Serial.print(F("Received newStatus: "));
   Serial.println(newStatus);
 
-  if(F("LOCK") == newStatus ){
+  if(F("LOCK") == newStatus && !isLocked){
     motorController(F("LOCK"));
     ledController(F("LOCK"));
     buzzerController(F("LOCK"));
     server.send(200, F("application/json"), F("{\"message\":\"Success\"}"));
-  } else if(F("UNLOCK") == newStatus){
+  } else if(F("UNLOCK") == newStatus && isLocked){
     motorController(F("UNLOCK"));
     ledController(F("UNLOCK"));
     buzzerController(F("UNLOCK"));
@@ -735,6 +742,8 @@ void rootHandler() {
     String ssid = server.arg("ssid");
     String password = server.arg("password");
     String mode = server.arg("mode");
+    String standaloneUser = server.arg("standaloneUser");
+    String standalonePass = server.arg("standalonePass");
 
     Serial.print(F("The received WiFi credential: "));
     Serial.println(ssid);
@@ -745,7 +754,18 @@ void rootHandler() {
     ssid.toCharArray(wiFiConfig.ssid, sizeof(ssid));
     password.toCharArray(wiFiConfig.pass, sizeof(password));
     if(F("STANDALONE") == mode){
+
+      if(standaloneUser.length() == 0 ||  standalonePass.length() == 0){
+        server.send(200, F("text/html"), setupPage);
+        return;
+      }
+
       wiFiConfig.isStandalone = true;
+      standaloneConfig = standalone_store.read();
+      standaloneUser.toCharArray(standaloneConfig.username, sizeof(standaloneUser));
+      standalonePass.toCharArray(standaloneConfig.password, sizeof(standalonePass));
+      standalone_store.write(standaloneConfig);
+
     } else {
       wiFiConfig.isStandalone = false;
     }
@@ -763,6 +783,12 @@ void rootHandler() {
 }
 
 void standaloneHandler(){
+  standaloneConfig = standalone_store.read();
+  
+  if(!server.authenticate(standaloneConfig.username, standaloneConfig.password)){
+    server.requestAuthentication();
+  }
+
   server.send(200, F("text/html"), standalonePage);
 }
 
