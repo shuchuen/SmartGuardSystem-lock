@@ -517,9 +517,21 @@ void doorSwitchListener(){
 
 void buttonListener(){
   buttonState = digitalRead(BUTTON_PIN);
+  unsigned long previousMillis = 0;
   while (buttonState == HIGH) {
     buttonState = digitalRead(BUTTON_PIN);
+    unsigned long currentMillis = millis();
+
+    if(previousMillis == 0){
+      previousMillis = millis();
+    } else {
+      if (currentMillis - previousMillis >= 10000) { //reset after preset the button 10s
+        resetDevice();
+      }  
+    }
+
     if(buttonState == LOW){ //Pressed and released the button
+      previousMillis = 0;
       if(!isLocked){
         motorController(F("LOCK"));
         buzzerController(F("LOCK"));
@@ -532,6 +544,7 @@ void buttonListener(){
         Serial.println(F("Door unlocked"));
       }
     }
+
   }
 }
 
@@ -793,20 +806,7 @@ void standaloneHandler(){
 }
 
 void resetHandler(){
-  //lock the door before reset the configs
-  if(!isLocked)
-    motorController(F("LOCK"));
-
-  ledController(F("RESET"));
-
-  wiFiConfig = wifi_store.read();
-  wiFiConfig.isReady = false;
-  wifi_store.write(wiFiConfig);
-
-  pairingConfig = pairing_store.read();
-  pairingConfig.isReady = false;
-  pairing_store.write(pairingConfig);
-
+  resetDevice();
   server.send(200, F("text/plain"), F("The device is going to restart. Please setup the device from step 1."));
   NVIC_SystemReset();
 }
@@ -892,5 +892,21 @@ void setMqttConnection(PairingConfig pairingConfig){
   } 
 
   Serial.println(F("You're connected to the MQTT broker!"));
+}
+
+void resetDevice(){
+    //lock the door before reset the configs
+  if(!isLocked)
+    motorController(F("LOCK"));
+
+  ledController(F("RESET"));
+
+  wiFiConfig = wifi_store.read();
+  wiFiConfig.isReady = false;
+  wifi_store.write(wiFiConfig);
+
+  pairingConfig = pairing_store.read();
+  pairingConfig.isReady = false;
+  pairing_store.write(pairingConfig);
 }
 
