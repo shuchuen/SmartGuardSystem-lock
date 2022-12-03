@@ -525,8 +525,9 @@ void buttonListener(){
     if(previousMillis == 0){
       previousMillis = millis();
     } else {
-      if (currentMillis - previousMillis >= 10000) { //reset after preset the button 10s
+      if (currentMillis - previousMillis >= 10000) { //reset after Pressed the button >= 10s
         resetDevice();
+        NVIC_SystemReset();
       }  
     }
 
@@ -614,7 +615,6 @@ void ledController(String mode){
 void pairingHandler(){
   Serial.println(F("Received pairing request"));
   
-
   if(isPaired){
     server.send(403, F("application/json"), F("{\"message\":\"Already paired, please reset the device before pair again.\"}"));
     return;
