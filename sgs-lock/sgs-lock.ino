@@ -53,8 +53,12 @@ const char* setupPage =
 #include "setup_page.h"
 ;
 
-const char* standalonePage = 
-#include "standalone_page.h"
+const char* adminPage = 
+#include "admin_page.h"
+;
+
+const char* resetPage = 
+#include "reset_page.h"
 ;
 
 // Reserve a portion of flash memory to store a "WiFiConfig" and PairingConfig
@@ -160,11 +164,12 @@ void setup() {
     } 
     
     if(isStandalone){
-      server.on(F("/standaloneAdmin"), HTTP_GET, standaloneHandler);
+      server.on(F("/admin"), HTTP_GET, adminHandler);
+      server.on(F("/reset"), HTTP_GET, resetGetHandler);
     }
 
     server.on(F("/status"), HTTP_POST, statusHandler);
-    server.on(F("/reset"), resetHandler);
+    server.on(F("/reset"), HTTP_POST, resetHandler);
     server.onNotFound(notFound);
     server.begin();
 
@@ -795,14 +800,24 @@ void rootHandler() {
   }
 }
 
-void standaloneHandler(){
+void adminHandler(){
   standaloneConfig = standalone_store.read();
   
   if(!server.authenticate(standaloneConfig.username, standaloneConfig.password)){
     server.requestAuthentication();
   }
 
-  server.send(200, F("text/html"), standalonePage);
+  server.send(200, F("text/html"), adminPage);
+}
+
+void resetGetHandler(){
+  standaloneConfig = standalone_store.read();
+  
+  if(!server.authenticate(standaloneConfig.username, standaloneConfig.password)){
+    server.requestAuthentication();
+  }
+
+  server.send(200, F("text/html"), resetPage);
 }
 
 void resetHandler(){

@@ -25,10 +25,6 @@ R"(
         cursor: pointer;
       }
 
-      .btn-primary {
-        background-color: #4CAF50;
-      }
-
       .btn-danger {
         background-color: #DC3545;
       }
@@ -37,31 +33,15 @@ R"(
   </head>
   <body>
     <div class="container">
-      <button class="button btn-primary" onclick='updateStatus(); return false'>UNLOCK</button>
-    </div>
-    <div class="container">
       <button class="button btn-danger" onclick='reset(); return false'>RESET</button>
     </div>
   </body>
   <script type="text/javascript">
-    function updateStatus() {
-      data = {
-        "status": "UNLOCK",
-      }
-
-      fetch('/status', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(data)
+    function reset() {
+      fetch('/reset', {
+        method: 'POST'
       })
     }
-
-    function reset() {
-      fetch('/reset');
-    }
-
   </script>
 </html>
 )"
