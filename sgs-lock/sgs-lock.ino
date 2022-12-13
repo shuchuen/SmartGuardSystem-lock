@@ -47,7 +47,7 @@ typedef struct {
 typedef struct {
   char username[30];
   char password[30];
-} StandaloneConfig;
+} AuthConfig;
 
 
 const char* setupPage = 
@@ -66,11 +66,11 @@ const char* resetPage =
 // call it "wifi_store".
 FlashStorage(wifi_store, WiFiConfig);
 FlashStorage(pairing_store, PairingConfig);
-FlashStorage(standalone_store, StandaloneConfig);
+FlashStorage(auth_store, AuthConfig);
 
 WiFiConfig wiFiConfig;
 PairingConfig pairingConfig;
-StandaloneConfig standaloneConfig;
+AuthConfig authConfig;
 
 //wifi config
 char hostname[] = LOCK_HOST;
@@ -617,6 +617,12 @@ void statusHandler(){
     return;
   }
 
+  authConfig = auth_store.read();
+  if(isStandalone && !server.authenticate(authConfig.username, authConfig.password)){
+    server.send(401, F("application/json"), F("{\"message\":\"Unauthorized request\"}"));
+    return;
+  }
+
   if(!server.hasArg("plain")){
     server.send(204, F("application/json"), F("{\"message\":\"Empty request\"}"));
     return;
@@ -681,10 +687,10 @@ void rootHandler() {
       }
 
       wiFiConfig.isStandalone = true;
-      standaloneConfig = standalone_store.read();
-      standaloneUser.toCharArray(standaloneConfig.username, sizeof(standaloneUser));
-      standalonePass.toCharArray(standaloneConfig.password, sizeof(standalonePass));
-      standalone_store.write(standaloneConfig);
+      authConfig = auth_store.read();
+      standaloneUser.toCharArray(authConfig.username, sizeof(standaloneUser));
+      standalonePass.toCharArray(authConfig.password, sizeof(standalonePass));
+      auth_store.write(authConfig);
 
     } else {
       wiFiConfig.isStandalone = false;
@@ -693,7 +699,9 @@ void rootHandler() {
     wiFiConfig.isReady = true;
     wifi_store.write(wiFiConfig);
 
-    server.send(201, F("text/plain"), F("The device is going to restart. This access point will be disappear if the WiFi credential is correct."));
+    server.send(201, F("text/plain"), F("The device is going to restart. 
+    This access point will be disappear if the WiFi credential is correct."));
+    
     NVIC_SystemReset();
   }
   else {
@@ -703,9 +711,9 @@ void rootHandler() {
 }
 
 void adminHandler(){
-  standaloneConfig = standalone_store.read();
+  authConfig = auth_store.read();
   
-  if(!server.authenticate(standaloneConfig.username, standaloneConfig.password)){
+  if(!server.authenticate(authConfig.username, authConfig.password)){
     server.requestAuthentication();
   }
 
@@ -713,9 +721,9 @@ void adminHandler(){
 }
 
 void resetGetHandler(){
-  standaloneConfig = standalone_store.read();
+  authConfig = auth_store.read();
   
-  if(!server.authenticate(standaloneConfig.username, standaloneConfig.password)){
+  if(!server.authenticate(authConfig.username, authConfig.password)){
     server.requestAuthentication();
   }
 
@@ -723,6 +731,12 @@ void resetGetHandler(){
 }
 
 void resetHandler(){
+  authConfig = auth_store.read();
+  if(isStandalone && !server.authenticate(authConfig.username, authConfig.password)){
+    server.send(401, F("application/json"), F("{\"message\":\"Unauthorized request\"}"));
+    return;
+  }
+
   resetDevice();
   server.send(200, F("text/plain"), F("The device is going to restart. Please setup the device from step 1."));
   NVIC_SystemReset();
