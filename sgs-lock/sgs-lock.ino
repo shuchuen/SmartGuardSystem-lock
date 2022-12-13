@@ -699,8 +699,7 @@ void rootHandler() {
     wiFiConfig.isReady = true;
     wifi_store.write(wiFiConfig);
 
-    server.send(201, F("text/plain"), F("The device is going to restart. 
-    This access point will be disappear if the WiFi credential is correct."));
+    server.send(201, F("text/plain"), F("The device is going to restart. This access point will be disappear if the WiFi credential is correct."));
     
     NVIC_SystemReset();
   }
@@ -840,4 +839,3 @@ void resetDevice(){
   pairingConfig.isReady = false;
   pairing_store.write(pairingConfig);
 }
-
