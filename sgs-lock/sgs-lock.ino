@@ -2,15 +2,16 @@
 #include <string>
 #include <Stepper.h>
 #include <ArduinoJson.h>
+#include <FlashStorage.h>
+#include <WiFiWebServer.h>
 #include <ArduinoMqttClient.h>
 #include <ArduinoHttpClient.h>
-#include "arduino_secret.h"
-#include <WiFiWebServer.h>
+
 #include <MFRC522v2.h>
 #include <MFRC522DriverSPI.h>
 #include <MFRC522DriverPinSimple.h>
-#include <MFRC522Debug.h>
-#include <FlashStorage.h>
+
+#include "arduino_secret.h"
 
 #define SS_PIN 10
 #define RST_PIN 9
@@ -194,105 +195,6 @@ void setup() {
     server.onNotFound(notFound);
     server.begin();
   }
-
-}
-
-//testing loop
-void test_loop() {
-  
-  digitalWrite(BUZZER_PIN, HIGH);
-
-  //test RGB LED
-  Serial.println("Green Light");
-  ledController(F("UNLOCK"));
-  //buzzerController(F("UNLOCK"));
-  delay(5000);
-
-  Serial.println("Red Light");
-  ledController(F("LOCK"));
-  //buzzerController(F("LOCK"));
-  delay(5000);
-
-  Serial.println("Yellow Light");
-  ledController("UNPAIR");
-  delay(5000);
-
-  Serial.println("Warning Light");
-  ledController(F("WARN"));
-  //buzzerController(F("WARN"));
-  delay(5000);
-  
-
-  /*
-  Serial.println(F("LOCK"));
-  buzzerController(F("LOCK"));
-  delay(10000);
-
-  Serial.println(F("UNLOCK"));
-  buzzerController(F("UNLOCK"));
-  delay(10000);
-
-  Serial.println(F("WARN"));
-  buzzerController(F("WARN"));
-  delay(10000);
-  */
-
-  /*
-  calibrateStepper();
-  if(calibrated == true){
-    Serial.println(lockStep);
-    buttonListener();
-  }
-  */
-
-  /*
-  //test stepper motor
-  myStepper.step(STEP_PRE_OUT_REV/4);
-  delay(1000);
-  myStepper.step(-STEP_PRE_OUT_REV/4);
-  delay(1000);
-  myStepper.step(STEP_PRE_OUT_REV/2);
-  delay(1000);
-  myStepper.step(-STEP_PRE_OUT_REV/2);
-  */
-
-  /*
-  String uid = rfidListener();
-  while (""==uid){
-    uid = rfidListener();
-    Serial.println("waiting");
-    delay(5000);
-  }
-  Serial.println("Uid:" + uid);
-
-  //test push button
-  buttonState = digitalRead(BUTTON_PIN);
-  while (buttonState == LOW) {
-    Serial.println("Not Pressed");
-
-    buttonState = digitalRead(BUTTON_PIN);
-    if (buttonState == HIGH) {
-      Serial.println("Pressed");
-    }
-
-    delay(1000);
-  }
-  */
-
-  /*
-  //test magnetic door switch
-  switchState = digitalRead(SWITCH_PIN);
-  while (switchState == LOW) {
-    Serial.println("Door opened");
-
-    switchState = digitalRead(SWITCH_PIN);
-    if (switchState == HIGH) {
-      Serial.println("Door closed");
-    }
-
-    delay(1000);
-  }
-  */
 
 }
 
